@@ -3,22 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP32-S3 terminal</title>
+<title>ESP32 BatDetector</title>
 <style>
   :root {
     --bg: #1b2230;
     --panel: #232c3d;
-    #--text: #e4e8f0;
-	--text: #00D000;     /* green text */
+    --text: #00c000;     /* green text */
     --muted: #8a95ab;
     --accent: #f2b84b;
     --err: #ff8a80;
-    --prompt: #8fd3ff;   /* light blue prompt */
-    #--ok: #7fd1ae;
-	--ok: #00FF00;
+    --ok: #7fd1ae;
+	--contr: #5289FA;
+	--prompt: #8fd3ff;   /* light blue prompt */
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
+  html { -webkit-text-size-adjust: 100%; }
   body {
     background: var(--bg);
     color: var(--text);
@@ -30,10 +30,18 @@
     padding: 12px;
     gap: 10px;
   }
-  header { display: flex; align-items: center; gap: 12px; }
-  h1 { font-size: 16px; font-weight: 600; margin: 0; flex: 1; }
-  #status { color: var(--muted); }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0; flex: 1 1 auto; min-width: 0; white-space: nowrap; }
+  h1.secondary { color: var(--contr); }
+  #status { color: var(--muted); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #status.on { color: var(--ok); }
+  .actions { display: flex; gap: 8px; }
+  /* Narrow screens (phones): title and status on the first line, the three buttons share the second line,
+     so the header is never wider than the screen and the browser does not zoom out to fit it. */
+  @media (max-width: 600px) {
+    .actions { flex: 1 1 100%; }
+    .actions button { flex: 1 1 0; padding: 8px 6px; }
+  }
   button {
     background: var(--accent);
     color: #1b2230;
@@ -44,10 +52,11 @@
     font-weight: 600;
     cursor: pointer;
   }
-  button.secondary { background: var(--panel); color: var(--text); }
+  button.secondary { background: var(--panel); color: var(--contr); }
   button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   #out {
     flex: 1;
+    min-width: 0;
     overflow-y: auto;
     background: var(--panel);
     border-radius: 8px;
@@ -62,8 +71,12 @@
   .prompt { color: var(--prompt); }
   .sent { color: var(--accent); }
   form { display: flex; gap: 8px; }
+  /* previous / next command buttons: only on touch screens and narrow windows, where there is no arrow key */
+  .hist { display: none; padding: 8px 12px; }
+  @media (pointer: coarse), (max-width: 600px) { .hist { display: inline-block; } }
   input {
     flex: 1;
+    min-width: 0;
     background: var(--panel);
     color: var(--text);
     border: 1px solid #36425a;
@@ -75,17 +88,21 @@
 </head>
 <body>
   <header>
-    <h1>ESP32-S3 terminal</h1>
+    <h1 class="secondary">ESP32 BatDetector</h1>
     <span id="status">Disconnected</span>
-    <button id="connect">Connect</button>
-    <button id="connectAll" class="secondary" title="List every Bluetooth LE device nearby (for troubleshooting)">All devices</button>
-    <button id="clear" class="secondary">Clear</button>
+    <div class="actions">
+      <button id="connect">Connect</button>
+      <button id="connectAll" class="secondary" title="List every Bluetooth LE device nearby (for troubleshooting)">All devices</button>
+      <button id="clear" class="secondary">Clear</button>
+    </div>
   </header>
 
   <pre id="out" aria-live="polite"></pre>
 
   <form id="form" autocomplete="off">
     <input id="cmd" placeholder="Type a command, e.g. help" disabled>
+    <button type="button" id="histUp" class="secondary hist" aria-label="Previous command" disabled>&#9650;</button>
+    <button type="button" id="histDown" class="secondary hist" aria-label="Next command" disabled>&#9660;</button>
     <button id="send" disabled>Send</button>
   </form>
 
@@ -99,6 +116,7 @@ const out = $('out'), cmd = $('cmd'), statusEl = $('status');
 const connectBtn = $('connect'), sendBtn = $('send');
 
 let device = null, rxChar = null, txChar = null;
+let lastDisconnectAt = 0;   // when the last BLE session ended (used to pace reconnects)
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 const history = [];
@@ -133,6 +151,7 @@ function setConnected(on) {
   statusEl.className = on ? 'on' : '';
   connectBtn.textContent = on ? 'Disconnect' : 'Connect';
   cmd.disabled = sendBtn.disabled = !on;
+  $('histUp').disabled = $('histDown').disabled = !on;
   $('connectAll').disabled = on;
   if (on) cmd.focus();
 }
@@ -242,6 +261,15 @@ function feed(bytes) {
   if (i < bytes.length) showDeviceText(bytes.subarray(i));  // e.g. the next prompt
 }
 
+
+
+
+//let swallowPrompts = false;   // true while a pcloud run is active
+//function showDeviceText(bytes) {
+//  const t = decoder.decode(bytes, { stream: true });
+//  if (swallowPrompts && /^\s*>\s*$/.test(t)) return;
+//  log(t);
+//}
 let swallowPrompts = false;   // true while a pcloud run is active
 function showDeviceText(bytes) {
   const t = decoder.decode(bytes, { stream: true });
@@ -256,6 +284,8 @@ function showDeviceText(bytes) {
   }
   log(t);
 }
+
+
 
 function onData(event) {
   const dv = event.target.value;
@@ -378,6 +408,144 @@ async function fetchFile(path, handlers = {}) {
   return { name, data, retries };
 }
 
+// ---- encrypted pCloud token ----
+// The token is never stored or sent in clear. "pcloud settoken" encrypts it in this page (AES-256-GCM, key from
+// a passphrase via PBKDF2, both built into the browser) and stores only the encrypted blob on the device as
+// /token.enc. The ESP32 just stores and forwards the blob and can never read the token. The passphrase is typed
+// here and never leaves this page.
+const TOKEN_FILE = '/token.enc';
+const PBKDF2_ITER = 200000;
+let credCache = null;        // decrypted { token, apiHost }, kept in memory until the connection closes
+
+const b64 = bytes => btoa(String.fromCharCode(...bytes));
+const unb64 = str => Uint8Array.from(atob(str), c => c.charCodeAt(0));
+
+function askText(title, opts = {}) {      // small dialog; resolves with the text, or null if cancelled
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;' +
+                            'justify-content:center;z-index:1000;padding:16px';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#fff;color:#222;border-radius:10px;padding:16px;max-width:420px;width:100%;' +
+                        'box-shadow:0 8px 24px rgba(0,0,0,.4);font-family:system-ui,sans-serif';
+    const h = document.createElement('div');
+    h.textContent = title;
+    h.style.cssText = 'font-weight:600;margin-bottom:10px';
+    const inp = document.createElement('input');
+    inp.type = opts.secret ? 'password' : 'text';
+    inp.value = opts.value || '';
+    inp.autocomplete = 'off';
+    inp.style.cssText = 'width:100%;box-sizing:border-box;padding:10px;font-size:16px;border:1px solid #999;border-radius:6px';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:12px';
+    const mk = (label, primary) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = 'padding:8px 16px;font-size:15px;border:0;border-radius:6px;cursor:pointer;' +
+                        (primary ? 'background:#0062C6;color:#fff' : 'background:#ddd;color:#222');
+      return b;
+    };
+    const cancel = mk('Cancel', false), ok = mk('OK', true);
+    const done = v => { overlay.remove(); resolve(v); };
+    cancel.onclick = () => done(null);
+    ok.onclick = () => done(inp.value);
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') done(inp.value);
+      if (e.key === 'Escape') done(null);
+    });
+    row.append(cancel, ok);
+    box.append(h, inp, row);
+    overlay.append(box);
+    document.body.append(overlay);
+    inp.focus();
+  });
+}
+
+function needCrypto() {
+  if (!window.crypto || !crypto.subtle) {
+    throw new Error('this browser feature needs a secure page (https:// or localhost)');
+  }
+}
+
+async function deriveTokenKey(pass, salt, iter) {
+  needCrypto();
+  if (!(iter >= 10000 && iter <= 2000000)) throw new Error('unsupported key derivation settings');
+  const base = await crypto.subtle.importKey('raw', encoder.encode(pass), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' }, base,
+                                 { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
+async function encryptToken(plain, pass) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveTokenKey(pass, salt, PBKDF2_ITER);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoder.encode(plain)));
+  return JSON.stringify({ v: 1, kdf: 'PBKDF2-SHA256', iter: PBKDF2_ITER, salt: b64(salt), iv: b64(iv), ct: b64(ct) });
+}
+
+async function decryptToken(meta, pass) {
+  const key = await deriveTokenKey(pass, unb64(meta.salt), meta.iter);
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(meta.iv) }, key, unb64(meta.ct));
+  return decoder.decode(plain);
+}
+
+// Token and API host for the pCloud commands: asks the device for the stored data and decrypts it here.
+async function getPcloudCredentials() {
+  if (credCache) return credCache;
+  const reply = await request('token');
+  const text = new TextDecoder().decode(reply.data).trim();
+  let plain;
+  if (text.startsWith('{')) {                       // encrypted token file
+    let meta;
+    try { meta = JSON.parse(text); } catch (e) { throw new Error('the token file on the device is damaged'); }
+    if (meta.v !== 1) throw new Error('unknown token file version');
+    for (let attempt = 1; ; attempt++) {
+      const pass = await askText('Passphrase for the pCloud token', { secret: true });
+      if (pass === null) throw new Error('cancelled, no passphrase entered');
+      try { plain = await decryptToken(meta, pass); break; }
+      catch (e) {
+        if (e.message && /secure page|unsupported/.test(e.message)) throw e;
+        log('Wrong passphrase.\n', 'error');
+        if (attempt >= 3) throw new Error('wrong passphrase');
+      }
+    }
+  } else {                                          // old unencrypted /token.txt
+    plain = text;
+    log('Warning: this token is stored and sent unencrypted. Run "pcloud settoken" to store it encrypted.\n', 'error');
+  }
+  const [token, host] = plain.split('\n').map(x => x.trim());
+  if (!token) throw new Error('no token found');
+  credCache = { token, apiHost: host || 'eapi.pcloud.com' };
+  return credCache;
+}
+
+// pcloud settoken: encrypt a pCloud token with a passphrase and store it on the device
+async function runSetToken() {
+  try { needCrypto(); } catch (e) { log(e.message + '\n', 'error'); return; }
+  const token = await askText('pCloud access token (hidden)', { secret: true });
+  if (!token || !token.trim()) { log('Cancelled.\n', 'sys'); return; }
+  const host = await askText('pCloud API host', { value: 'eapi.pcloud.com' });
+  if (!host || !host.trim()) { log('Cancelled.\n', 'sys'); return; }
+  const pass1 = await askText('Choose a passphrase (at least 12 characters)', { secret: true });
+  if (!pass1) { log('Cancelled.\n', 'sys'); return; }
+  if (pass1.length < 12) { log('The passphrase is too short: use at least 12 characters (a few random words are fine).\n', 'error'); return; }
+  const pass2 = await askText('Repeat the passphrase', { secret: true });
+  if (pass1 !== pass2) { log('The passphrases do not match, nothing was stored.\n', 'error'); return; }
+
+  swallowPrompts = true;
+  try {
+    log('Encrypting the token...\n', 'sys');
+    const blob = await encryptToken(token.trim() + '\n' + host.trim(), pass1);
+    await putFile(TOKEN_FILE, encoder.encode(blob));
+    credCache = null;
+    log('Encrypted token stored as ' + TOKEN_FILE + ' on the device. Remember the passphrase: it cannot be recovered.\n', 'sys');
+  } catch (e) {
+    log('Could not store the token: ' + e.message + '\n', 'error');
+  } finally {
+    swallowPrompts = false;
+  }
+}
+
 // pcloud <file> [folderid]: the browser does the upload, the ESP32 only supplies data
 async function runPcloudPut(args) {
   const path = args[0];
@@ -385,6 +553,7 @@ async function runPcloudPut(args) {
   if (!path || !/^\d+$/.test(folderId)) {
     log('usage: pcloud put <file> [folderid]   (folderid 0 = root)\n' +
         '       pcloud get <path in pCloud> [device file]\n' +
+        '       pcloud settoken   (store your pCloud token encrypted on the device)\n' +
         '       upload [device file]   (choose a file on this computer)\n', 'error');
     return;
   }
@@ -394,9 +563,7 @@ async function runPcloudPut(args) {
   swallowPrompts = true;
   try {
     log('Fetching token from the device...\n', 'sys');
-    const tok = await request('token');
-    const [token, host] = new TextDecoder().decode(tok.data).split('\n').map(x => x.trim());
-    const apiHost = host || 'eapi.pcloud.com';
+    const { token, apiHost } = await getPcloudCredentials();
 
     s.step = 'receive';
     const t0 = performance.now();
@@ -451,7 +618,7 @@ async function runPcloudPut(args) {
     printSummary(false, s, e, folderId);
   } finally {
     swallowPrompts = false;
-    showPrompt();
+	showPrompt();
   }
 }
 
@@ -611,9 +778,7 @@ async function runPcloudGet(args) {
   swallowPrompts = true;
   try {
     log('Fetching token from the device...\n', 'sys');
-    const tok = await request('token');
-    const [token, host] = new TextDecoder().decode(tok.data).split('\n').map(x => x.trim());
-    const apiHost = host || 'eapi.pcloud.com';
+    const { token, apiHost } = await getPcloudCredentials();
 
     s.step = 'link';
     log('Asking pCloud for a download link...\n', 'sys');
@@ -657,7 +822,7 @@ async function runPcloudGet(args) {
     printSendSummary(false, s, e);
   } finally {
     swallowPrompts = false;
-    showPrompt();
+	showPrompt();
   }
 }
 
@@ -684,13 +849,14 @@ async function runUpload(text) {
     printSendSummary(false, s, e);
   } finally {
     swallowPrompts = false;
-    showPrompt();
+	showPrompt();
   }
 }
 
 // pcloud put <file> [folderid]  |  pcloud get <remote> [device file]  |  pcloud <file> [folderid]
 async function runPcloud(text) {
   const args = parseArgs(text).slice(1);
+  if (args[0] === 'settoken') return runSetToken();
   if (args[0] === 'get') return runPcloudGet(args.slice(1));
   if (args[0] === 'put') return runPcloudPut(args.slice(1));
   return runPcloudPut(args);
@@ -702,8 +868,57 @@ function onDisconnected() {
   finishPending(gone);
   writeChunk = 20;
   log('\nDisconnected.\n', 'sys');
+  lastDisconnectAt = Date.now();
+  credCache = null;
   setConnected(false);
   rxChar = txChar = null;
+}
+
+// Everything after the device has been chosen. The first write ("time ...") is the first access to a
+// protected characteristic, so on a phone that is where the pairing dialog / notification appears.
+async function openSession() {
+  const server  = await device.gatt.connect();
+  const service = await server.getPrimaryService(NUS_SERVICE);
+  rxChar = await service.getCharacteristic(NUS_RX);
+  txChar = await service.getCharacteristic(NUS_TX);
+
+  txChar.addEventListener('characteristicvaluechanged', onData);
+  await txChar.startNotifications();
+
+  log('Connected to ' + (device.name || 'an unnamed device') + '\n', 'sys');
+  setConnected(true);
+  // Sync the ESP32 clock: Unix seconds plus this computer's UTC offset in minutes
+  const epoch = Math.floor(Date.now() / 1000);
+  const offsetMin = -new Date().getTimezoneOffset();
+  log('Syncing time...\n', 'sys');
+  await write('time ' + epoch + ' ' + offsetMin + '\n');
+  log('Tip: "pcloud put <file>" uploads a device file to pCloud, "upload" copies a file from this computer to the device.\n', 'sys');
+}
+
+// Try to open a session several times. Android's Bluetooth stack sometimes fails a connection
+// attempt for no good reason ("Connection attempt failed"); an immediate retry usually works.
+async function connectWithRetries(maxTries) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxTries; attempt++) {
+    try {
+      await openSession();
+      return;
+    } catch (e) {
+      lastErr = e;
+      // A plain "connection attempt failed" is a one-off: retry quickly. Anything else may be pairing in
+      // progress (on Android, look for the passkey request in the notification area): wait longer.
+      const quick = /connection attempt failed/i.test(e.message);
+      log('Attempt ' + attempt + ' of ' + maxTries + ' failed (' + e.name + ': ' + e.message + ').\n', 'error');
+      try { if (device.gatt.connected) device.gatt.disconnect(); } catch (ignored) {}
+      if (attempt < maxTries) {
+        const waitMs = quick ? 1500 : 5000;
+        if (!quick) log('If your phone asks for a passkey, enter it now.\n', 'sys');
+        log('Retrying in ' + (waitMs / 1000) + ' s...\n', 'sys');
+        await sleep(waitMs);
+      }
+    }
+  }
+  throw lastErr;
 }
 
 async function connect(showAll = false) {
@@ -712,37 +927,41 @@ async function connect(showAll = false) {
     return;
   }
   try {
-    log('Choose your ESP32-S3 in the Bluetooth dialog...\n', 'sys');
-    // Normal mode only lists devices whose advertised name starts with "ESP32".
-    // "All devices" lists every BLE device, which helps when a board does not show up.
-    device = await navigator.bluetooth.requestDevice(showAll
-      ? { acceptAllDevices: true, optionalServices: [NUS_SERVICE] }
-      : { filters: [{ namePrefix: 'ESP32' }], optionalServices: [NUS_SERVICE] });
-    device.addEventListener('gattserverdisconnected', onDisconnected);
+    // On Android, reconnect to the device chosen a moment ago without scanning again (fewer Android scan
+    // problems). After two minutes, on other systems, or with "All devices", the device dialog is shown.
+    const isAndroid = /Android/i.test(navigator.userAgent);
+    const canReuse = isAndroid && device && !device.gatt.connected && !showAll && lastDisconnectAt &&
+                     (Date.now() - lastDisconnectAt < 120000);
 
-    const server  = await device.gatt.connect();
-	// Add slight delays before reading/writing (fixes Android timing issues)
-	await new Promise(resolve => setTimeout(resolve, 200)); 
-    const service = await server.getPrimaryService(NUS_SERVICE);
-	await new Promise(resolve => setTimeout(resolve, 200)); 
-    rxChar = await service.getCharacteristic(NUS_RX);
-	await new Promise(resolve => setTimeout(resolve, 200)); 
-    txChar = await service.getCharacteristic(NUS_TX);
-	await new Promise(resolve => setTimeout(resolve, 200)); 
+    if (!canReuse) {
+      // The device dialog may only be opened straight from the click, so do it before anything that waits.
+      log('Choose your ESP32-S3 in the Bluetooth dialog...\n', 'sys');
+      // Normal mode only lists devices whose advertised name starts with "ESP32".
+      // "All devices" lists every BLE device, which helps when a board does not show up.
+      device = await navigator.bluetooth.requestDevice(showAll
+        ? { acceptAllDevices: true, optionalServices: [NUS_SERVICE] }
+        : { filters: [{ namePrefix: 'ESP32' }], optionalServices: [NUS_SERVICE] });
+      device.addEventListener('gattserverdisconnected', onDisconnected);
+    }
 
-    txChar.addEventListener('characteristicvaluechanged', onData);
-    await txChar.startNotifications();
+    // Give Android a moment after the last session ended; reconnecting instantly fails more often.
+    const sinceLast = Date.now() - lastDisconnectAt;
+    if (isAndroid && sinceLast < 2000) await sleep(2000 - sinceLast);
 
-    log('Connected to ' + (device.name || 'an unnamed device') + '\n', 'sys');
-    setConnected(true);
-    // Sync the ESP32 clock: Unix seconds plus this computer's UTC offset in minutes
-    const epoch = Math.floor(Date.now() / 1000);
-    const offsetMin = -new Date().getTimezoneOffset();
-    log('Syncing time...\n', 'sys');
-    await write('time ' + epoch + ' ' + offsetMin + '\n');
-    log('Tip: "pcloud put <file>" uploads a device file to pCloud, "upload" copies a file from this computer to the device.\n', 'sys');
+    if (canReuse) {
+      log('Reconnecting to ' + (device.name || 'the last device') + '...\n', 'sys');
+      try {
+        await connectWithRetries(3);
+      } catch (e) {
+        // A new device dialog needs a fresh click (the browser rejects it after waiting), so ask for one.
+        device = null;
+        log('Reconnect failed. Click Connect again and choose the device from the list.\n', 'error');
+      }
+      return;
+    }
+    await connectWithRetries(4);
   } catch (e) {
-    log('Connection failed: ' + e.message + '\n', 'error');
+    log('Connection failed: ' + e.name + ': ' + e.message + '\n', 'error');
     if (/No Services matching/i.test(e.message)) {
       log('That device is not running the terminal service (Nordic UART). Is the right firmware on it?\n', 'sys');
     }
@@ -753,6 +972,14 @@ async function connect(showAll = false) {
 function disconnect() {
   if (device && device.gatt.connected) device.gatt.disconnect();
 }
+
+// Close the BLE link when the page is reloaded or closed. Chrome on Android can leave it open, which
+// keeps the ESP32 busy and makes the next connection fail.
+function closeLink() {
+  try { if (device && device.gatt.connected) device.gatt.disconnect(); } catch (e) {}
+}
+window.addEventListener('pagehide', closeLink);
+window.addEventListener('beforeunload', closeLink);
 
 let writeChunk = 20;   // raised to MTU-3 once the device reports its MTU (see negotiateWriteSize)
 async function writeBytes(bytes) {
@@ -786,14 +1013,25 @@ $('form').addEventListener('submit', async e => {
   catch (err) { log('Send failed: ' + err.message + '\n', 'error'); }
 });
 
-cmd.addEventListener('keydown', e => {
-  if (e.key === 'ArrowUp' && histPos > 0) {
-    cmd.value = history[--histPos]; e.preventDefault();
-  } else if (e.key === 'ArrowDown') {
+// Command history: arrow up / down on a keyboard, or the two buttons next to Send on touch screens
+function historyStep(dir) {
+  if (dir < 0 && histPos > 0) {
+    cmd.value = history[--histPos];
+  } else if (dir > 0) {
     histPos = Math.min(histPos + 1, history.length);
-    cmd.value = history[histPos] || ''; e.preventDefault();
+    cmd.value = history[histPos] || '';
   }
+  cmd.setSelectionRange(cmd.value.length, cmd.value.length);
+}
+cmd.addEventListener('keydown', e => {
+  if (e.key === 'ArrowUp')        { historyStep(-1); e.preventDefault(); }
+  else if (e.key === 'ArrowDown') { historyStep(+1); e.preventDefault(); }
 });
+for (const [id, dir] of [['histUp', -1], ['histDown', +1]]) {
+  const b = $(id);
+  b.addEventListener('pointerdown', e => e.preventDefault());   // keep the focus (and the keyboard) in the input
+  b.addEventListener('click', () => { historyStep(dir); cmd.focus(); });
+}
 
 if (!navigator.bluetooth) {
   log('This browser does not support Web Bluetooth. Use Chrome or Edge on desktop or Android.\n', 'error');
